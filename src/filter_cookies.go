@@ -10,7 +10,7 @@ func filterCookies(allCookies []cookie, filters cookieFilters) (filteredCookies 
 	for _, cookie := range allCookies {
 		// Ignore expired cookies, when expiration is present
 		currentTime := time.Now().Unix()
-		if currentTime > int64(cookie.expiration) && cookie.expiration > 0 {
+		if currentTime > int64(cookie.expiration) && cookie.expiration > 0 && !filters.allowExpired {
 			continue
 		}
 
