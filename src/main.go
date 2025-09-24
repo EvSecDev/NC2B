@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"runtime"
+	"strings"
 )
 
 type cookieFilters struct {
@@ -15,6 +16,7 @@ type cookieFilters struct {
 
 func main() {
 	var netscapeCookieFile string
+	var browserName string
 	var browserCookieStore string
 	var filters cookieFilters
 	var versionInfoRequested bool
@@ -25,14 +27,15 @@ Netscape Cookie to Browser (NC2B)
   Retrieves cookies from netscape text files and injects into browser cookie storage
 
   Options:
-    -j, --cookie-jar         <path/to/file>  Path to netscape cookie file to read cookies
-    -b, --browser-cookie-jar <path/to/file>  Path to browser cookie storage file
-    -n, --name               <text>          Import cookies matching name
-    -d, --domain             <text>          Import cookies matching hostname
-        --allow-expired                      Enable importing expired cookies
-    -h, --help                               Show this help menu
-    -V, --version                            Show version and packages
-        --versionid                          Show only version number
+    -j, --cookie-jar         <path/to/file>   Path to netscape cookie file to read cookies
+    -b, --browser            <firefox|chrome> Browser name
+    -c, --browser-cookie-jar <path/to/file>   Path to browser cookie storage file
+    -n, --name               <text>           Import cookies matching name
+    -d, --domain             <text>           Import cookies matching hostname
+        --allow-expired                       Enable importing expired cookies
+    -h, --help                                Show this help menu
+    -V, --version                             Show version and packages
+        --versionid                           Show only version number
 
 Report bugs to: dev@evsec.net
 NC2B home page: <https://github.com/EvSecDev/NC2B>
@@ -40,7 +43,9 @@ General help using GNU software: <https://www.gnu.org/gethelp/>
 `
 	flag.StringVar(&netscapeCookieFile, "j", "", "")
 	flag.StringVar(&netscapeCookieFile, "cookie-jar", "", "")
-	flag.StringVar(&browserCookieStore, "b", "", "")
+	flag.StringVar(&browserName, "b", "", "")
+	flag.StringVar(&browserName, "browser", "", "")
+	flag.StringVar(&browserCookieStore, "c", "", "")
 	flag.StringVar(&browserCookieStore, "browser-cookie-jar", "", "")
 	flag.StringVar(&filters.name, "n", "", "")
 	flag.StringVar(&filters.name, "name", "", "")
@@ -54,7 +59,7 @@ General help using GNU software: <https://www.gnu.org/gethelp/>
 	flag.Usage = func() { fmt.Printf("Usage: %s [OPTIONS]...%s", os.Args[0], usage) }
 	flag.Parse()
 
-	const progVersion string = "v0.1.0"
+	const progVersion string = "v0.2.0"
 	if versionInfoRequested {
 		fmt.Printf("NC2B %s\n", progVersion)
 		fmt.Printf("Built using %s(%s) for %s on %s\n", runtime.Version(), runtime.Compiler, runtime.GOOS, runtime.GOARCH)
@@ -65,8 +70,20 @@ General help using GNU software: <https://www.gnu.org/gethelp/>
 		return
 	}
 
-	if netscapeCookieFile == "" || browserCookieStore == "" {
+	if netscapeCookieFile == "" || browserCookieStore == "" || browserName == "" {
 		fmt.Printf("No arguments specified or incorrect argument combination. Use '-h' or '--help' to guide your way.\n")
+		return
+	}
+
+	// Config of browser settings
+	browsers := setupBrowserSettings()
+
+	// Validate user browser choice
+	browserName = strings.TrimSpace(browserName)
+	browserName = strings.ToLower(browserName)
+	_, validBrowserChoice := browsers[browserName]
+	if !validBrowserChoice {
+		logError("Invalid option", fmt.Errorf("unsupported browser '%s'", browserName))
 	}
 
 	netscapeFileRaw, err := os.ReadFile(netscapeCookieFile)
@@ -78,17 +95,14 @@ General help using GNU software: <https://www.gnu.org/gethelp/>
 	cookiesToImport, err := filterCookies(cookieList, filters)
 	logError("Failed to filter cookies", err)
 
-	err = writeCookiesToFirefox(cookiesToImport, browserCookieStore)
-	logError("Failed to write cookies to browser", err)
+	err = browsers[browserName].handlerFunc(cookiesToImport, browserCookieStore, browsers[browserName].dbTable)
+	logError("Failed to import cookies into browser", err)
 }
 
 func logError(errorDescription string, errorMessage error) {
-	// return early if no error to process
 	if errorMessage == nil {
 		return
 	}
-
-	// Print the error
 	fmt.Fprintf(os.Stderr, "%s: %v\n", errorDescription, errorMessage)
 	os.Exit(1)
 }

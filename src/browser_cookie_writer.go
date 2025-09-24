@@ -1,7 +1,6 @@
 package main
 
 import (
-	"database/sql"
 	"fmt"
 	"strings"
 	"time"
@@ -9,7 +8,7 @@ import (
 	_ "github.com/mattn/go-sqlite3"
 )
 
-/* moz_cookies all columns+types
+/* table: moz_cookies all columns+types
 id                        int
 originAttributes          string
 name                      string
@@ -27,25 +26,15 @@ schemeMap                 int
 isPartitionedAttributeSet int
 */
 
-func writeCookiesToFirefox(cookies []cookie, dbPath string) (err error) {
-	timeout := 2000 // Timeout in milliseconds
-	connStr := fmt.Sprintf("file:%s?_timeout=%d", dbPath, timeout)
-
-	db, err := sql.Open("sqlite3", connStr)
+func writeCookiesToFirefox(cookies []cookie, dbPath string, tableName string) (err error) {
+	db, err := connectToDB(dbPath)
 	if err != nil {
-		err = fmt.Errorf("error opening database at '%s': %v", dbPath, err)
+		err = fmt.Errorf("Failed to connect to database at '%s': %v", dbPath, err)
 		return
 	}
 	defer db.Close()
 
-	err = db.Ping()
-	if err != nil {
-		err = fmt.Errorf("error connecting to database: %v", err)
-		return
-	}
-
-	query := `
-		INSERT OR REPLACE INTO moz_cookies (
+	query := fmt.Sprintf(`INSERT OR REPLACE INTO "%s" (
 			host,
 			path,
 			isSecure,
@@ -61,23 +50,8 @@ func writeCookiesToFirefox(cookies []cookie, dbPath string) (err error) {
 			schemeMap,
 			isPartitionedAttributeSet
 		)
-		VALUES (
-			?,
-			?,
-			?,
-			?,
-			?,
-			?,
-			?,
-			'', -- originAttributes, assuming empty string as placeholder
-			?,  -- lastAccessed
-			?,  -- creationTime
-			0,  -- inBrowserElement, assuming 0
-			0,  -- sameSite, assuming 0
-			0,  -- schemeMap, assuming 0
-			0   -- isPartitionedAttributeSet, assuming 0
-		);
-	`
+		VALUES (?, ?, ?, ?,	?, ?, ?, ?,	?, ?, ?, ?, ?, ?);
+	`, tableName)
 
 	for _, cookie := range cookies {
 		// Convert boolean to integer, 1=true
@@ -99,7 +73,29 @@ func writeCookiesToFirefox(cookies []cookie, dbPath string) (err error) {
 		creationTime := time.Now().UnixMicro()
 		lastAccessTime := creationTime
 
-		_, err = db.Exec(query, cookie.domain, cookie.path, isSecureInt, isHttpOnlyInt, cookie.expiration, cookie.name, cookie.value, lastAccessTime, creationTime)
+		// Defaults for non-netscape cookie fields
+		originAttr := ""     // empty string as placeholder
+		inBrowserElem := 0   // always 0
+		sameSite := 0        // none
+		scheme := 0          // http=0 https=1
+		partitionedAttr := 0 // not partitioned
+
+		_, err = db.Exec(query,
+			cookie.domain,     // host
+			cookie.path,       // path
+			isSecureInt,       // isSecure
+			isHttpOnlyInt,     // isHttpOnly
+			cookie.expiration, // expiry
+			cookie.name,       // name
+			cookie.value,      // value
+			originAttr,        // originAttributes
+			lastAccessTime,    // lastAccessed
+			creationTime,      // creationTime
+			inBrowserElem,     // inBrowserElement
+			sameSite,          // sameSite
+			scheme,            // schemeMap
+			partitionedAttr,   // isPartitionedAttributeSet
+		)
 		if err != nil {
 			err = fmt.Errorf("error updating cookie %s (%s): %v", cookie.name, cookie.domain, err)
 			return
@@ -107,4 +103,137 @@ func writeCookiesToFirefox(cookies []cookie, dbPath string) (err error) {
 	}
 
 	return
+}
+
+/* table: cookies all columns+types
+creation_utc             int
+host_key                 string
+top_frame_site_key       string
+name                     string
+value                    string
+encrypted_value          []byte
+path                     string
+expires_utc              int
+is_secure                int
+is_httponly              int
+last_access_utc          int
+has_expires              int
+is_persistent            int
+priority                 int
+samesite                 int
+source_scheme            int
+source_port              int
+last_update_utc          int
+source_type              int
+has_cross_site_ancestor  int
+*/
+
+func writeCookiesToChrome(cookies []cookie, dbPath string, tableName string) (err error) {
+	db, err := connectToDB(dbPath)
+	if err != nil {
+		err = fmt.Errorf("Failed to connect to database at '%s': %v", dbPath, err)
+		return
+	}
+	defer db.Close()
+
+	query := fmt.Sprintf(`
+		INSERT OR REPLACE INTO "%s" (
+			creation_utc,
+			host_key,
+			name,
+			value,
+			path,
+			expires_utc,
+			is_secure,
+			is_httponly,
+			last_access_utc,
+			has_expires,
+			is_persistent,
+			priority,
+			encrypted_value,
+			samesite,
+			source_scheme,
+			top_frame_site_key,
+			source_port,
+			last_update_utc,
+			source_type,
+			has_cross_site_ancestor
+		)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+	`, tableName)
+
+	for _, cookie := range cookies {
+		// Convert booleans
+		isSecureInt := 0
+		if cookie.isSecure {
+			isSecureInt = 1
+		}
+		isHttpOnlyInt := 0
+		if cookie.httpOnly {
+			isHttpOnlyInt = 1
+		}
+
+		// Ensure domain has leading dot for subdomain inclusion
+		if cookie.includeSub && !strings.HasPrefix(cookie.domain, ".") {
+			cookie.domain = "." + cookie.domain
+		}
+
+		now := time.Now().UnixMicro()
+		expiration := int64(cookie.expiration) * 1000000 // seconds to microseconds
+
+		// Convert to chromes timestamp
+		expiration = unixMicroToChromeTimestamp(expiration)
+		now = unixMicroToChromeTimestamp(now)
+
+		// Defaults for non-netscape cookie fields
+		hasExpires := 1              // Does not invalidate on browser close
+		isPersistent := 1            // Same as above
+		priority := 1                // Medium priority
+		encryptedValue := []byte("") // unused
+		sameSite := -1               // unspecified
+		sourceScheme := 2            // unspecified=0, http=1, https=2
+		topFrameSiteKey := ""        // none
+		sourcePort := 0              // unknown
+		sourceType := 0              // unknown
+		hasCrossSiteAncestor := 0    // not sent in cross-site iframe
+
+		_, err = db.Exec(query,
+			now,                  // creation_utc
+			cookie.domain,        // host_key
+			cookie.name,          // name
+			cookie.value,         // value
+			cookie.path,          // path
+			expiration,           // expires_utc
+			isSecureInt,          // is_secure
+			isHttpOnlyInt,        // is_httponly
+			now,                  // last_access_utc
+			hasExpires,           // has_expires
+			isPersistent,         // is_persistent
+			priority,             // priority
+			encryptedValue,       // encrypted_value
+			sameSite,             // samesite
+			sourceScheme,         // source_scheme
+			topFrameSiteKey,      // top_frame_site_key
+			sourcePort,           // source_port
+			now,                  // last_update_utc
+			sourceType,           // source_type
+			hasCrossSiteAncestor, // has_cross_site_ancestor
+		)
+		if err != nil {
+			err = fmt.Errorf("error updating cookie %s (%s): %v", cookie.name, cookie.domain, err)
+			return
+		}
+	}
+	return
+}
+
+func unixMicroToChromeTimestamp(unixMicro int64) int64 {
+	const epochDifferenceSeconds = 11644473600
+	const microsecondsPerSecond = 1_000_000
+
+	// Convert the epoch difference to microseconds
+	epochDifferenceMicro := int64(epochDifferenceSeconds * microsecondsPerSecond)
+
+	// Add the epoch difference to the input unix microseconds
+	return unixMicro + epochDifferenceMicro
 }
